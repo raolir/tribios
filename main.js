@@ -1,5 +1,18 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import Stats from 'stats';
+import GUI from 'lil-gui';
+
+// Adjustable settings
+const settings = {
+    debug: false,
+    panorama: 1,
+	lowerY: -0.6,
+    upperY: 0.6,
+    phase: 0.0,
+    speed: 0.0,
+    twisted: false
+};
 
 // Setup renderer
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -22,27 +35,29 @@ controls.rotateSpeed = -0.5;
 controls.enableDamping = true;
 controls.dampingFactor = 0.05;
 
-// Setup texture
+// Setup texture loading
 const textureLoader = new THREE.TextureLoader();
-const panoramaTexture = textureLoader.load(
-    'panorama.png',
-    () => {
-        console.log("Texture loaded");
-    }
-);
-panoramaTexture.wrapS = THREE.RepeatWrapping;
-panoramaTexture.wrapT = THREE.ClampToEdgeWrapping;
-panoramaTexture.minFilter = THREE.LinearFilter;
-panoramaTexture.magFilter = THREE.LinearFilter;
+function loadPanorama( index ) {
+    const panoramaTexture = textureLoader.load(`panoramas/${index}.png`);
+    panoramaTexture.wrapS = THREE.RepeatWrapping;
+    panoramaTexture.wrapT = THREE.ClampToEdgeWrapping;
+    panoramaTexture.minFilter = THREE.LinearFilter;
+    panoramaTexture.magFilter = THREE.LinearFilter;
+    return panoramaTexture;
+}
 
 const geometry = new THREE.PlaneGeometry(2, 2);
 const material = new THREE.ShaderMaterial({
     uniforms: {
-        uTime: { value: 0.0 },
         uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
         uInverseProjection: { value: new THREE.Matrix4() },
         uInverseView: { value: new THREE.Matrix4() },
-        uTexture: { value: panoramaTexture }
+        uTexture: { value: loadPanorama(settings.panorama) },
+        uDebug: { value: settings.debug },
+        uLowerY: { value: settings.lowerY },
+        uUpperY: { value: settings.upperY },
+        uPhase: { value: settings.phase },
+        uTwisted: { value: settings.twisted }
     },
     vertexShader: `
         // Simple pass-through.
@@ -51,16 +66,22 @@ const material = new THREE.ShaderMaterial({
         }
     `,
     fragmentShader: `
-        uniform float uTime;
         uniform vec2 uResolution;
         uniform mat4 uInverseProjection;
         uniform mat4 uInverseView;
         uniform sampler2D uTexture;
 
+        uniform bool uDebug;
+
+        uniform float uLowerY;
+        uniform float uUpperY;
+        uniform float uPhase;
+        uniform bool uTwisted;
+
         const float PI = 3.14159265359;
 
         void main() {
-            // --- 1. Screen to World Ray (Unproject) ---
+            // --- Screen to World Ray (Unproject) ---
             vec2 uv = gl_FragCoord.xy / uResolution;
             vec2 ndc = uv * 2.0 - 1.0;
             
@@ -71,16 +92,50 @@ const material = new THREE.ShaderMaterial({
             vec3 worldRay = (uInverseView * vec4(viewRay, 0.0)).xyz;
             worldRay = normalize(worldRay);
 
-            // --- 2. World Ray to Spherical Coordinates ---
+            // --- Log-Polar Coordinates in the Riemann Sphere ---
+            float rho = atanh(worldRay.y);
             float theta = atan(worldRay.z, worldRay.x);
-            float phi = asin(worldRay.y);
 
-            // --- 3. Spherical to Equirectangular UV Coordinates ---
+            // --- Periodic Annulus ---
+            float lowerRho = atanh(uLowerY);
+            float upperRho = atanh(uUpperY);
+            float period = upperRho - lowerRho;
+
+            // --- Debug ---
+            if (uDebug) {
+                rho = (ndc.y - 0.5) * period + lowerRho;
+                theta = ndc.x * 2.0 * PI;
+            }
+
+            // --- Log-Polar Rotation and Scale ---
+            if (uTwisted) {
+                float innerFactor = period / (2.0 * PI);
+                float outerFactor = 1.0 / (1.0 + innerFactor * innerFactor);
+
+                float twistedRho = (rho - theta * innerFactor);
+                float twistedTheta = (theta + rho * innerFactor);
+
+                rho = twistedRho;
+                theta = twistedTheta;
+            }
+
+            // --- Droste Effect ---
+            rho = lowerRho + mod(rho - lowerRho - uPhase * period, period);
+            float newY = tanh(rho);
+            float phi = asin(newY);
+
+            // --- Spherical to Equirectangular UV Coordinates ---
             float u = 0.5 + theta / (2.0 * PI);
             float v = 0.5 + phi / PI;
 
-            // --- 4. Sample Texture ---
+            // --- Sample Texture ---
             vec3 color = texture(uTexture, vec2(u, v)).rgb;
+
+            // --- Debug ---
+            if (uDebug) {
+                vec2 inside = step(-0.5, ndc) - step(0.5, ndc);
+                color *= 0.5 + 0.5 * inside.x * inside.y;
+            }
 
             gl_FragColor = vec4(color, 1.0);
         }
@@ -98,14 +153,45 @@ window.addEventListener('resize', () => {
     material.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
 });
 
+// Setup GUI
+const gui = new GUI();
+const panoramaList = [];
+for (var i = 1; i <= 100; i++) { panoramaList.push(i); }
+gui.add(settings, 'panorama', panoramaList).onFinishChange( value => { material.uniforms.uTexture.value = loadPanorama(value); } );
+gui.add(settings, 'debug');
+gui.add(settings, 'lowerY', -0.99999, 0.99999);
+gui.add(settings, 'upperY', -0.99999, 0.99999);
+gui.add(settings, 'phase', 0.0, 1.0).listen();
+gui.add(settings, 'speed', -1.0, 1.0);
+gui.add(settings, 'twisted');
+
+// Setup stats
+const stats = new Stats();
+document.body.appendChild(stats.dom);
+
 // Animation loop
+let lastTime = 0;
 function animate( time ) {
+    stats.begin();
+
+    const deltaTime = (time - (lastTime || time)) / 1000;
+    lastTime = time;    
+
 	controls.update();
     camera.updateMatrixWorld();
 
     material.uniforms.uInverseProjection.value.copy(camera.projectionMatrixInverse);
-    material.uniforms.uInverseView.value.copy(camera.matrixWorld); 
-    //material.uniforms.uTime.value += elapsedTime;
+    material.uniforms.uInverseView.value.copy(camera.matrixWorld);
+
+    settings.phase = (settings.phase + deltaTime * settings.speed) % 1;
+
+    material.uniforms.uDebug.value= settings.debug;
+    material.uniforms.uLowerY.value= settings.lowerY;
+    material.uniforms.uUpperY.value= settings.upperY;
+    material.uniforms.uPhase.value= settings.phase;
+    material.uniforms.uTwisted.value= settings.twisted;
 
     renderer.render(scene, camera);
+
+    stats.end();
 }
