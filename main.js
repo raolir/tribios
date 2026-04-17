@@ -5,13 +5,13 @@ import GUI from 'lil-gui';
 
 // Adjustable settings
 const settings = {
-    debug: false,
-    panorama: 1,
+    fov: 75,
+    panorama: '1',
 	lowerY: -0.6,
     upperY: 0.6,
     phase: 0.0,
     speed: 0.0,
-    twisted: false
+    twisting: 0.0
 };
 
 // Setup renderer
@@ -24,7 +24,7 @@ document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 
 // Setup camera
-const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 1000);
+const camera = new THREE.PerspectiveCamera(settings.fov, window.innerWidth / window.innerHeight, 0.1, 1000);
 camera.position.set(0, 0, 1);
 
 // Setup controls
@@ -37,8 +37,8 @@ controls.dampingFactor = 0.05;
 
 // Setup texture loading
 const textureLoader = new THREE.TextureLoader();
-function loadPanorama( index ) {
-    const panoramaTexture = textureLoader.load(`panoramas/${index}.png`);
+function loadPanorama( filename ) {
+    const panoramaTexture = textureLoader.load(`panoramas/${filename}.png`);
     panoramaTexture.wrapS = THREE.RepeatWrapping;
     panoramaTexture.wrapT = THREE.ClampToEdgeWrapping;
     panoramaTexture.minFilter = THREE.LinearFilter;
@@ -53,11 +53,10 @@ const material = new THREE.ShaderMaterial({
         uInverseProjection: { value: new THREE.Matrix4() },
         uInverseView: { value: new THREE.Matrix4() },
         uTexture: { value: loadPanorama(settings.panorama) },
-        uDebug: { value: settings.debug },
         uLowerY: { value: settings.lowerY },
         uUpperY: { value: settings.upperY },
         uPhase: { value: settings.phase },
-        uTwisted: { value: settings.twisted }
+        uTwisting: { value: settings.twisting }
     },
     vertexShader: `
         // Simple pass-through.
@@ -71,12 +70,10 @@ const material = new THREE.ShaderMaterial({
         uniform mat4 uInverseView;
         uniform sampler2D uTexture;
 
-        uniform bool uDebug;
-
         uniform float uLowerY;
         uniform float uUpperY;
         uniform float uPhase;
-        uniform bool uTwisted;
+        uniform float uTwisting;
 
         const float PI = 3.14159265359;
 
@@ -101,23 +98,12 @@ const material = new THREE.ShaderMaterial({
             float upperRho = atanh(uUpperY);
             float period = upperRho - lowerRho;
 
-            // --- Debug ---
-            if (uDebug) {
-                rho = (ndc.y - 0.5) * period + lowerRho;
-                theta = ndc.x * 2.0 * PI;
-            }
-
-            // --- Log-Polar Rotation and Scale ---
-            if (uTwisted) {
-                float innerFactor = period / (2.0 * PI);
-                float outerFactor = 1.0 / (1.0 + innerFactor * innerFactor);
-
-                float twistedRho = (rho - theta * innerFactor);
-                float twistedTheta = (theta + rho * innerFactor);
-
-                rho = twistedRho;
-                theta = twistedTheta;
-            }
+            // --- Log-Polar Rotation and Scale (Twisting) ---
+            float twistingFactor = uTwisting * period / (2.0 * PI);
+            float twistedRho = (rho - theta * twistingFactor);
+            float twistedTheta = (theta + rho * twistingFactor);
+            rho = twistedRho;
+            theta = twistedTheta;
 
             // --- Droste Effect ---
             rho = lowerRho + mod(rho - lowerRho - uPhase * period, period);
@@ -130,12 +116,6 @@ const material = new THREE.ShaderMaterial({
 
             // --- Sample Texture ---
             vec3 color = texture(uTexture, vec2(u, v)).rgb;
-
-            // --- Debug ---
-            if (uDebug) {
-                vec2 inside = step(-0.5, ndc) - step(0.5, ndc);
-                color *= 0.5 + 0.5 * inside.x * inside.y;
-            }
 
             gl_FragColor = vec4(color, 1.0);
         }
@@ -153,17 +133,19 @@ window.addEventListener('resize', () => {
     material.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
 });
 
+// Setup panorama list
+const panoramaList = [];
+for (var i = 1; i <= 100; i++) { panoramaList.push(i.toString()); }
+
 // Setup GUI
 const gui = new GUI();
-const panoramaList = [];
-for (var i = 1; i <= 100; i++) { panoramaList.push(i); }
+gui.add(settings, 'fov', 0, 180, 1).onChange( value => { camera.fov = value; camera.updateProjectionMatrix(); } );
 gui.add(settings, 'panorama', panoramaList).onFinishChange( value => { material.uniforms.uTexture.value = loadPanorama(value); } );
-gui.add(settings, 'debug');
 gui.add(settings, 'lowerY', -0.99999, 0.99999);
 gui.add(settings, 'upperY', -0.99999, 0.99999);
 gui.add(settings, 'phase', 0.0, 1.0).listen();
 gui.add(settings, 'speed', -1.0, 1.0);
-gui.add(settings, 'twisted');
+gui.add(settings, 'twisting', 0.0, 10.0, 0.1);
 
 // Setup stats
 const stats = new Stats();
@@ -185,11 +167,10 @@ function animate( time ) {
 
     settings.phase = (settings.phase + deltaTime * settings.speed) % 1;
 
-    material.uniforms.uDebug.value= settings.debug;
     material.uniforms.uLowerY.value= settings.lowerY;
     material.uniforms.uUpperY.value= settings.upperY;
     material.uniforms.uPhase.value= settings.phase;
-    material.uniforms.uTwisted.value= settings.twisted;
+    material.uniforms.uTwisting.value= settings.twisting;
 
     renderer.render(scene, camera);
 
